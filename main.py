@@ -14,7 +14,7 @@ app = FastAPI(title="Anime Vault Player")
 
 # ==================== BACKEND ====================
 
-ANILIBRIA_BASE = "https://api.anilibria.top/api/v1"
+ANILIBRIA_BASE =  "https://api.aniliberty.top/api/v1"
 TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 _cache: dict[str, tuple[float, dict]] = {}
 CACHE_TTL = 300
