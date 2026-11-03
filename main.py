@@ -1,7 +1,5 @@
 """
 Anime Vault Player — всё в одном файле.
-Запуск: pip install fastapi uvicorn httpx && uvicorn main:app --reload
-Открыть: http://localhost:8000
 """
 
 from fastapi import FastAPI, HTTPException, Query
@@ -12,12 +10,10 @@ import time
 
 app = FastAPI(title="Anime Vault Player")
 
-# ==================== 
 ANILIBRIA_BASE = "https://api.anilibria.app/api/v1"
 TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 _cache: dict[str, tuple[float, dict]] = {}
 CACHE_TTL = 300
-
 
 async def fetch_anilibria(path: str, params: Optional[dict] = None):
     cache_key = f"{path}:{params}"
@@ -37,11 +33,9 @@ async def fetch_anilibria(path: str, params: Optional[dict] = None):
         except httpx.TimeoutException:
             raise HTTPException(status_code=504, detail="AniLibria timeout")
         except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code,
-                                detail=f"AniLibria error: {e.response.status_code}")
+            raise HTTPException(status_code=e.response.status_code, detail="AniLibria error")
         except httpx.RequestError as e:
             raise HTTPException(status_code=502, detail=f"Network error: {str(e)}")
-
 
 @app.get("/api/catalog")
 async def catalog(
@@ -56,7 +50,8 @@ async def catalog(
         offset = (page - 1) * limit
         data = await fetch_anilibria("/anime/releases/latest", {"limit": limit, "offset": offset})
         items = data if isinstance(data, list) else data.get("data", [])
-        result = []
+
+    result = []
     for item in items:
         result.append({
             "id": item.get("id"),
@@ -66,12 +61,9 @@ async def catalog(
                 or (item.get("poster") or {}).get("src", "")
             ),
             "year": item.get("year"),
-            "type": ((item.get("type") or {}).get("full_string")
-                     or (item.get("type") or {}).get("string")),
+            "type": ((item.get("type") or {}).get("full_string") or (item.get("type") or {}).get("string")),
         })
     return {"items": result, "page": page}
-
-
 
 @app.get("/api/episodes/{release_id}")
 async def episodes(release_id: int):
@@ -100,9 +92,6 @@ async def episodes(release_id: int):
         "release_name": (data.get("name") or {}).get("main", ""),
         "episodes": result,
     }
-
-
-# ==================== FRONTEND (встроенный HTML) ====================
 
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="ru">
@@ -168,7 +157,7 @@ main{display:grid;grid-template-columns:1fr 380px;flex:1;overflow:hidden}
 </main>
 <script>
 'use strict';
-const API = ''; // пусто = тот же origin
+const API = ''; 
 const video = document.getElementById('video');
 const nowPlaying = document.getElementById('nowPlaying');
 const statusEl = document.getElementById('status');
@@ -269,7 +258,6 @@ loadCatalog('');
 </script>
 </body>
 </html>"""
-
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
