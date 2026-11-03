@@ -56,19 +56,21 @@ async def catalog(
         offset = (page - 1) * limit
         data = await fetch_anilibria("/anime/releases/latest", {"limit": limit, "offset": offset})
         items = data if isinstance(data, list) else data.get("data", [])
-
-    result = []
+        result = []
     for item in items:
         result.append({
             "id": item.get("id"),
             "name": (item.get("name") or {}).get("main") or "Без названия",
-            "poster": ((item.get("poster") or {}).get("optimized") or {}).get("src")
-                      or (item.get("poster") or {}).get("src", ""),
+            "poster": "https://api.anilibria.app" + (
+                ((item.get("poster") or {}).get("optimized") or {}).get("src")
+                or (item.get("poster") or {}).get("src", "")
+            ),
             "year": item.get("year"),
             "type": ((item.get("type") or {}).get("full_string")
                      or (item.get("type") or {}).get("string")),
         })
     return {"items": result, "page": page}
+
 
 
 @app.get("/api/episodes/{release_id}")
