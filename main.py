@@ -1,113 +1,79 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import httpx
-import asyncio
 
 app = FastAPI()
+ANILIBRIA_BASE = "https://api.anilibria.app/api/v1"
 
-# --- КОНФИГУРАЦИЯ ---
-SHIKIMORI_API = "https://shikimori.one/api"
-KODIK_API = "https://kodikapi.com"
-# Токен Kodik (публичный, может меняться)
-KODIK_TOKEN = "b3f8c8e7f3e0e1d6c9a2b5f4e8d7c6b5"
-
-HEADERS = {
-    "User-Agent": "AnimePortal/1.0 (https://github.com/your-repo)" # Shikimori требует User-Agent 
-}
-
-# --- БЭКЕНД ---
+def get_poster(item):
+    poster_data = item.get("poster") or {}
+    opt = poster_data.get("optimized") or {}
+    src = opt.get("src") or poster_data.get("src") or ""
+    if src.startswith("/"):
+        return "https://api.anilibria.app" + src
+    return src
 
 @app.get("/api/catalog")
 async def catalog(search: str = None):
-    """Каталог с Shikimori (там есть ВСЕ аниме)."""
-    async with httpx.AsyncClient(headers=HEADERS) as client:
+    async with httpx.AsyncClient() as client:
         try:
             if search:
-                # Поиск по названию
-                r = await client.get(f"{SHIKIMORI_API}/animes", params={
-                    "search": search, "limit": 30, "order": "popularity"
-                })
+                r = await client.get(f"{ANILIBRIA_BASE}/app/search/releases", params={"query": search})
             else:
-                # Топ аниме (как на главной)
-                r = await client.get(f"{SHIKIMORI_API}/animes", params={
-                    "limit": 30, "order": "popularity"
-                })
+                r = await client.get(f"{ANILIBRIA_BASE}/anime/releases/latest", params={"limit": 50})
             
             r.raise_for_status()
             data = r.json()
+            if isinstance(data, dict): data = data.get("data", [])
             
             items = []
-            for anime in data:
-                poster = anime.get("image", {}).get("original", "")
-                if poster and not poster.startswith("http"):
-                    poster = "https://shikimori.one" + poster
-                
+            for i in data:
+                team = i.get("team") or {}
+                voice = team.get("voice") or []
+                voice_names = ", ".join([v.get("name") for v in voice]) if voice else "AniLibria"
                 items.append({
-                    "id": anime.get("id"),
-                    "name": anime.get("russian") or anime.get("name"),
-                    "poster": poster,
-                    "year": anime.get("aired_on", "")[:4] if anime.get("aired_on") else "",
-                    "score": anime.get("score", "0"),
-                    "voice": "Kodik (выбор озвучек)" # Заглушка, реальные озвучки будут внутри
+                    "id": i.get("id"), 
+                    "name": i.get("name", {}).get("main", "Без названия"), 
+                    "poster": get_poster(i),
+                    "year": i.get("year"),
+                    "voice": voice_names
                 })
             return {"items": items}
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            return {"items": [], "error": str(e)}
 
-@app.get("/api/release/{shikimori_id}")
-async def release_info(shikimori_id: int):
-    """Информация об аниме + поиск озвучек на Kodik."""
-    async with httpx.AsyncClient(headers=HEADERS) as client:
+@app.get("/api/release/{release_id}")
+async def release_info(release_id: int):
+    async with httpx.AsyncClient() as client:
         try:
-            # 1. Получаем инфу с Shikimori
-            r = await client.get(f"{SHIKIMORI_API}/animes/{shikimori_id}")
+            r = await client.get(f"{ANILIBRIA_BASE}/anime/releases/{release_id}")
             r.raise_for_status()
-            anime = r.json()
+            data = r.json()
             
-            poster = anime.get("image", {}).get("original", "")
-            if poster and not poster.startswith("http"):
-                poster = "https://shikimori.one" + poster
-
-            # 2. Ищем озвучки на Kodik по shikimori_id
-            voice_list = []
-            try:
-                k_params = {
-                    "token": KODIK_TOKEN,
-                    "shikimori_id": str(shikimori_id),
-                    "limit": 20
-                }
-                kr = await client.get(f"{KODIK_API}/search", params=k_params)
-                k_data = kr.json()
-                
-                for res in k_data.get("results", []):
-                    # Kodik отдает ссылку на плеер, из которой можно вытащить озвучку
-                    voice_name = res.get("translation", {}).get("title", "Неизвестно")
-                    link = res.get("link", "")
-                    if link and not link.startswith("http"):
-                        link = "https:" + link
+            team = data.get("team") or {}
+            voice = team.get("voice") or []
+            voice_names = ", ".join([v.get("name") for v in voice]) if voice else "AniLibria"
+            
+            eps = []
+            for e in data.get("episodes", []):
+                hls_url = e.get("hls_1080") or e.get("hls_720") or e.get("hls_480")
+                if hls_url:
+                    eps.append({
+                        "name": e.get("name") or f"Эпизод {e.get('ordinal')}", 
+                        "hls": hls_url
+                    })
                     
-                    if voice_name and link:
-                        voice_list.append({
-                            "voice": voice_name,
-                            "link": link,
-                            "quality": res.get("quality", "720p")
-                        })
-            except Exception:
-                pass # Если Kodik не ответил, оставляем список пустым
-
             return {
-                "id": anime.get("id"),
-                "name": anime.get("russian") or anime.get("name"),
-                "description": anime.get("description", "Описание отсутствует."),
-                "poster": poster,
-                "year": anime.get("aired_on", "")[:4] if anime.get("aired_on") else "",
-                "score": anime.get("score", "0"),
-                "voices": voice_list # Список доступных озвучек
+                "id": data.get("id"),
+                "name": data.get("name", {}).get("main"),
+                "description": data.get("description", "Описание отсутствует."),
+                "poster": get_poster(data),
+                "year": data.get("year"),
+                "voice": voice_names,
+                "episodes": eps
             }
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-# --- ФРОНТЕНД (Дизайн как у тебя был, но с выбором озвучек) ---
+            return {"error": str(e)}
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -117,7 +83,7 @@ def index():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Anime Portal (Kodik Edition)</title>
+    <title>Anime Portal</title>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
     <style>
         :root { 
@@ -152,31 +118,37 @@ def index():
         .hero p { font-size: 1.1rem; color: var(--muted); max-width: 500px; }
         
         .section-title { font-size: 1.6rem; margin-bottom: 1.5rem; border-left: 4px solid var(--accent); padding-left: 1rem; text-shadow: var(--accent-glow); }
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 1.5rem; }
+        
+        /* Сетка строго по 5 в ряд */
+        .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1.5rem; }
+        @media (max-width: 1200px) { .grid { grid-template-columns: repeat(4, 1fr); } }
+        @media (max-width: 900px) { .grid { grid-template-columns: repeat(3, 1fr); } }
+        @media (max-width: 600px) { .grid { grid-template-columns: repeat(2, 1fr); gap: 1rem; } }
+        
         .card { background: var(--surface); border-radius: 16px; overflow: hidden; cursor: pointer; transition: 0.3s; border: 1px solid transparent; position: relative; }
         .card:hover { transform: translateY(-8px); border-color: var(--accent); box-shadow: 0 10px 30px rgba(77, 124, 255, 0.25); }
         .card img { width: 100%; aspect-ratio: 2/3; object-fit: cover; display: block; }
         .card-info { padding: 1rem; }
         .card-title { font-size: 0.9rem; font-weight: bold; margin-bottom: 0.4rem; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
         .card-meta { font-size: 0.75rem; color: var(--accent); }
-        .card-voice { font-size: 0.7rem; color: var(--muted); margin-top: 0.3rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         
         .details-layout { display: grid; grid-template-columns: 1fr 380px; gap: 2rem; }
         @media (max-width: 1000px) { .details-layout { grid-template-columns: 1fr; } }
-        .video-container { background: black; border-radius: 16px; overflow: hidden; border: 1px solid rgba(77, 124, 255, 0.3); box-shadow: 0 0 30px rgba(77, 124, 255, 0.15); aspect-ratio: 16/9; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+        .video-container { background: black; border-radius: 16px; overflow: hidden; border: 1px solid rgba(77, 124, 255, 0.3); box-shadow: 0 0 30px rgba(77, 124, 255, 0.15); aspect-ratio: 16/9; }
         video { width: 100%; height: 100%; display: block; }
         .details-info { margin-top: 1.5rem; background: var(--surface); padding: 1.5rem; border-radius: 16px; }
         .details-info h2 { color: var(--accent); margin-bottom: 0.8rem; font-size: 1.4rem; }
         .details-info p { color: var(--muted); line-height: 1.7; font-size: 0.9rem; }
-        
         .voice-selector { margin-bottom: 1.5rem; background: var(--surface); padding: 1.5rem; border-radius: 16px; border: 1px solid rgba(77, 124, 255, 0.2); }
         .voice-selector label { display: block; font-size: 0.9rem; color: var(--accent); margin-bottom: 0.8rem; font-weight: bold; }
-        .voice-selector select { width: 100%; padding: 0.9rem; border-radius: 10px; background: rgba(0,0,0,0.4); color: white; border: 1px solid var(--muted); font-size: 0.95rem; }
-        .voice-selector select:focus { border-color: var(--accent); outline: none; box-shadow: var(--accent-glow); }
-        
+        .voice-selector select { width: 100%; padding: 0.9rem; border-radius: 10px; background: rgba(0,0,0,0.4); color: white; border: 1px solid var(--muted); }
         .back-btn { margin-bottom: 1.5rem; display: inline-flex; align-items: center; gap: 0.5rem; background: none; border: none; color: var(--muted); font-size: 1rem; cursor: pointer; }
         .back-btn:hover { color: var(--accent); text-shadow: var(--accent-glow); }
         .loader { text-align: center; color: var(--accent); font-size: 1.2rem; padding: 3rem; text-shadow: var(--accent-glow); }
+        .episode-list { background: var(--surface); border-radius: 16px; padding: 1.2rem; max-height: 650px; overflow-y: auto; }
+        .ep-btn { width: 100%; text-align: left; padding: 0.9rem 1rem; margin-bottom: 0.5rem; background: rgba(0,0,0,0.25); color: white; border: 1px solid rgba(77, 124, 255, 0.15); border-radius: 10px; cursor: pointer; transition: 0.2s; display: flex; justify-content: space-between; }
+        .ep-btn:hover { border-color: var(--accent); background: rgba(77, 124, 255, 0.08); }
+        .ep-btn.active { border-color: var(--accent); box-shadow: inset 0 0 15px rgba(77, 124, 255, 0.2); background: rgba(77, 124, 255, 0.12); }
     </style>
 </head>
 <body>
@@ -191,160 +163,164 @@ def index():
             <button onclick="doSearch()">Найти</button>
         </div>
     </header>
-
     <main>
         <div id="page-home" class="page active">
-            <div class="hero">
-                <h2>Твой портал в мир аниме</h2>
-                <p>База Shikimori + озвучки Kodik. Выбирай студию по вкусу.</p>
+            <div class="hero"><h2>Твой портал в мир аниме</h2><p>Смотри любимые тайтлы в высоком качестве.</p></div>
+            
+            <!-- Секция истории просмотров -->
+            <div id="history-section" style="display: none; margin-bottom: 2.5rem;">
+                <h2 class="section-title">Вы недавно смотрели</h2>
+                <div id="history-grid" class="grid"></div>
             </div>
-            <h2 class="section-title">Популярное</h2>
+
+            <h2 class="section-title">Последние обновления</h2>
             <div id="home-grid" class="grid"><div class="loader">Загрузка...</div></div>
         </div>
-
         <div id="page-catalog" class="page">
             <h2 class="section-title">Каталог аниме</h2>
             <div id="catalog-grid" class="grid"><div class="loader">Загрузка...</div></div>
         </div>
-
         <div id="page-watch" class="page">
             <button class="back-btn" onclick="nav('catalog')">← Вернуться в каталог</button>
-            
             <div class="details-layout">
                 <div class="left-col">
-                    <div class="video-container" id="player-container">
-                        <p>Выберите озвучку, чтобы начать просмотр</p>
-                    </div>
-                    
+                    <div class="video-container"><video id="video" controls></video></div>
                     <div class="voice-selector" id="voice-selector" style="display:none;">
-                        <label>🎙 Выберите озвучку (Kodik):</label>
-                        <select id="voiceSelect" onchange="changeVoice()">
-                            <option value="">-- Выберите студию --</option>
-                        </select>
+                        <label>🎙 Дополнительные озвучки (Kodik):</label>
+                        <select id="voiceSelect" onchange="changeVoice()"><option value="">-- Выберите --</option></select>
                     </div>
-
-                    <div class="details-info">
-                        <h2 id="watch-title">Название</h2>
-                        <div id="watch-tags" style="margin-bottom: 1rem; color: var(--muted);"></div>
-                        <p id="watch-desc">Описание...</p>
-                    </div>
+                    <div class="details-info"><h2 id="watch-title">Название</h2><div id="watch-tags" style="margin-bottom: 1rem; color: var(--muted);"></div><p id="watch-desc">Описание...</p></div>
                 </div>
+                <div class="right-col"><div class="episode-list"><h3>Эпизоды</h3><div id="episodes-container"><div class="loader">Загрузка...</div></div></div></div>
             </div>
         </div>
     </main>
-
     <script>
-        let currentAnime = null;
-
-        function nav(pageId) {
-            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-            document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
-            document.getElementById('page-' + pageId).classList.add('active');
-            if (document.getElementById('nav-' + pageId)) {
-                document.getElementById('nav-' + pageId).classList.add('active');
-            }
-            window.scrollTo(0, 0);
+        let hls = null, currentEpisodes = [], currentRelease = null;
+        
+        // История просмотров
+        function getHistory() {
+            try { return JSON.parse(localStorage.getItem('anime_history')) || []; } catch(e) { return []; }
         }
-
-        async function loadCatalog(query = '') {
-            const targetGrid = document.getElementById('catalog-grid');
-            targetGrid.innerHTML = '<div class="loader">Загрузка...</div>';
-            try {
-                const res = await fetch('/api/catalog' + (query ? '?search=' + encodeURIComponent(query) : ''));
-                const data = await res.json();
-                renderGrid(data.items, targetGrid);
-            } catch(e) {
-                targetGrid.innerHTML = '<div class="loader">Ошибка загрузки</div>';
-            }
+        function saveToHistory(anime) {
+            let hist = getHistory();
+            hist = hist.filter(a => a.id !== anime.id); // Удаляем дубликат
+            hist.unshift(anime); // Добавляем в начало
+            if (hist.length > 10) hist = hist.slice(0, 10); // Храним только 10 последних
+            localStorage.setItem('anime_history', JSON.stringify(hist));
+            loadHistory(); // Обновляем секцию на главной
         }
-
-        async function loadHome() {
-            const targetGrid = document.getElementById('home-grid');
-            try {
-                const res = await fetch('/api/catalog');
-                const data = await res.json();
-                renderGrid(data.items, targetGrid);
-            } catch(e) {
-                targetGrid.innerHTML = '<div class="loader">Ошибка загрузки</div>';
-            }
-        }
-
-        function renderGrid(items, container) {
-            if (!items || items.length === 0) {
-                container.innerHTML = '<div class="loader">Ничего не найдено</div>';
+        function loadHistory() {
+            const hist = getHistory();
+            const section = document.getElementById('history-section');
+            const grid = document.getElementById('history-grid');
+            if (hist.length === 0) {
+                section.style.display = 'none';
                 return;
             }
-            container.innerHTML = items.map(item => `
+            section.style.display = 'block';
+            grid.innerHTML = hist.map(item => `
                 <div class="card" onclick="openAnime(${item.id})">
                     <img src="${item.poster}" loading="lazy" onerror="this.src='https://via.placeholder.com/300x450/121a2e/4d7cff?text=No+Image'">
                     <div class="card-info">
                         <div class="card-title">${item.name}</div>
-                        <div class="card-meta">${item.year} ★ ${item.score}</div>
+                        <div class="card-meta">${item.year || ''}</div>
                     </div>
                 </div>
             `).join('');
         }
 
-        function doSearch() {
-            const q = document.getElementById('searchInput').value;
-            nav('catalog');
-            loadCatalog(q);
+        function nav(id) { 
+            document.querySelectorAll('.page').forEach(p => p.classList.remove('active')); 
+            document.querySelectorAll('nav a').forEach(a => a.classList.remove('active')); 
+            document.getElementById('page-' + id).classList.add('active'); 
+            if(document.getElementById('nav-' + id)) document.getElementById('nav-' + id).classList.add('active'); 
+            window.scrollTo(0,0); 
         }
-
+        
+        async function loadCatalog(q = '') { 
+            const g = document.getElementById('catalog-grid'); 
+            g.innerHTML = '<div class="loader">Загрузка...</div>'; 
+            try { 
+                const r = await fetch('/api/catalog' + (q ? '?search=' + encodeURIComponent(q) : '')); 
+                const d = await r.json(); 
+                renderGrid(d.items, g); 
+            } catch(e) { g.innerHTML = '<div class="loader">Ошибка</div>'; } 
+        }
+        
+        async function loadHome() { 
+            const g = document.getElementById('home-grid'); 
+            try { 
+                const r = await fetch('/api/catalog'); 
+                const d = await r.json(); 
+                renderGrid(d.items, g); 
+            } catch(e) { g.innerHTML = '<div class="loader">Ошибка</div>'; } 
+        }
+        
+        function renderGrid(items, c) { 
+            if (!items || !items.length) { c.innerHTML = '<div class="loader">Ничего не найдено</div>'; return; } 
+            c.innerHTML = items.map(i => `
+                <div class="card" onclick="openAnime(${i.id})">
+                    <img src="${i.poster}" loading="lazy" onerror="this.src='https://via.placeholder.com/300x450/121a2e/4d7cff?text=No+Image'">
+                    <div class="card-info">
+                        <div class="card-title">${i.name}</div>
+                        <div class="card-meta">${i.year || ''}</div>
+                    </div>
+                </div>
+            `).join(''); 
+        }
+        
+        function doSearch() { 
+            const q = document.getElementById('searchInput').value; 
+            nav('catalog'); 
+            loadCatalog(q); 
+        }
+        
         async function openAnime(id) {
             nav('watch');
             document.getElementById('watch-title').innerText = 'Загрузка...';
             document.getElementById('watch-desc').innerText = '';
-            document.getElementById('player-container').innerHTML = '<p>Загрузка данных...</p>';
+            document.getElementById('episodes-container').innerHTML = '<div class="loader">Загрузка...</div>';
             document.getElementById('voice-selector').style.display = 'none';
-
+            if (hls) { hls.destroy(); hls = null; }
+            document.getElementById('video').removeAttribute('src');
+            
             try {
-                const res = await fetch('/api/release/' + id);
-                const data = await res.json();
+                const r = await fetch('/api/release/' + id);
+                const d = await r.json();
+                currentRelease = d;
+                document.getElementById('watch-title').innerText = d.name;
+                document.getElementById('watch-desc').innerText = d.description || 'Описание отсутствует.';
+                document.getElementById('watch-tags').innerHTML = `Год: ${d.year || '?'} | Озвучка: ${d.voice}`;
                 
-                currentAnime = data;
-                document.getElementById('watch-title').innerText = data.name;
-                document.getElementById('watch-desc').innerText = data.description || 'Описание отсутствует.';
-                document.getElementById('watch-tags').innerHTML = `Год: ${data.year} | Рейтинг: ${data.score}`;
-                
-                if (data.voices && data.voices.length > 0) {
-                    const selector = document.getElementById('voice-selector');
-                    const select = document.getElementById('voiceSelect');
-                    selector.style.display = 'block';
-                    select.innerHTML = '<option value="">-- Выберите студию --</option>' + 
-                        data.voices.map((v, i) => `<option value="${i}">${v.voice} (${v.quality})</option>`).join('');
-                    
-                    document.getElementById('player-container').innerHTML = '<p>Выберите озвучку в списке ниже</p>';
+                // Сохраняем в историю
+                saveToHistory({ id: d.id, name: d.name, poster: d.poster, year: d.year });
+
+                currentEpisodes = d.episodes || [];
+                if (currentEpisodes.length) {
+                    document.getElementById('episodes-container').innerHTML = currentEpisodes.map((ep, i) => `<button class="ep-btn" id="ep-btn-${i}" onclick="playEpisode(${i})"><span>${ep.name}</span><span>▶</span></button>`).join('');
+                    playEpisode(0);
                 } else {
-                    document.getElementById('player-container').innerHTML = '<p style="color:red">Озвучки Kodik не найдены для этого тайтла. Попробуйте другое аниме.</p>';
+                    document.getElementById('episodes-container').innerHTML = '<div style="color:var(--muted)">Эпизоды не найдены</div>';
                 }
-
-            } catch(e) {
-                document.getElementById('watch-title').innerText = 'Ошибка загрузки';
-                document.getElementById('watch-desc').innerText = e.message;
-            }
+            } catch(e) { document.getElementById('watch-title').innerText = 'Ошибка'; document.getElementById('watch-desc').innerText = e.message; }
         }
-
-        function changeVoice() {
-            const idx = document.getElementById('voiceSelect').value;
-            if (idx === '' || !currentAnime || !currentAnime.voices) return;
-            
-            const voice = currentAnime.voices[parseInt(idx)];
-            const container = document.getElementById('player-container');
-            
-            // Kodik отдает ссылку на iframe-плеер. Мы встраиваем его.
-            // Это самый надежный способ, так как прямые HLS-ссылки Kodik требуют сложной расшифровки.
-            container.innerHTML = `
-                <iframe src="${voice.link}" 
-                        style="width:100%; height:100%; border:none;" 
-                        allow="autoplay; fullscreen; encrypted-media" 
-                        allowfullscreen>
-                </iframe>
-            `;
+        
+        function playEpisode(i) {
+            const ep = currentEpisodes[i]; if (!ep) return;
+            document.querySelectorAll('.ep-btn').forEach(b => b.classList.remove('active'));
+            const btn = document.getElementById('ep-btn-' + i); if (btn) btn.classList.add('active');
+            const cont = document.querySelector('.video-container');
+            if (!cont.querySelector('video')) cont.innerHTML = '<video id="video" controls></video>';
+            const video = document.getElementById('video');
+            if (hls) { hls.destroy(); hls = null; }
+            if (Hls.isSupported()) { hls = new Hls(); hls.loadSource(ep.hls); hls.attachMedia(video); } else { video.src = ep.hls; }
+            video.play().catch(() => {});
         }
-
-        loadHome();
+        
+        loadHome(); 
         loadCatalog();
+        loadHistory();
     </script>
 </body>
 </html>
